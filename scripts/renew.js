@@ -13,6 +13,8 @@
 //   DISCORD_EMAIL     panel account email
 //   DISCORD_PASSWORD  panel account password
 //   NODE_LINK         protocol node links used as the network environment
+//   PANEL_COOKIE      optional: panel session cookie header from a real
+//                     browser login; skips the login form entirely
 //   BOT_ID            bot id on the panel (default: 8edd6402)
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -270,10 +272,16 @@ async function passTurnstile(page) {
   return false;
 }
 
-(async () => {
-  let proxyProc = null;
-  try { proxyProc = await startProxy(); }
-  catch (e) { console.log('proxy start failed, continuing without proxy:', e.message); }
+function cookieHeaderToCookies(header) {
+  return header.split(';').map(s => s.trim()).filter(Boolean).map(pair => {
+    const i = pair.indexOf('=');
+    if (i < 1) return null;
+    return { name: pair.slice(0, i).trim(), value: pair.slice(i + 1).trim(),
+      domain: 'my.discordbothost.com', path: '/' };
+  }).filter(Boolean);
+}
+
+async function launchSession(proxyProc) {
   const launchArgs = ['--disable-blink-features=AutomationControlled', '--no-sandbox'];
   const baseOpts = { headless: false, args: launchArgs };
   if (proxyProc) baseOpts.proxy = { server: 'http://127.0.0.1:10808' };
@@ -300,58 +308,90 @@ async function passTurnstile(page) {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
   const page = await context.newPage();
-  try {
-    if (proxyProc) {
-      try {
-        await page.goto('https://api.ipify.org', { timeout: 20000 });
-        console.log('egress ip:', (await page.locator('body').innerText()).trim());
-      } catch (e) { console.log('egress ip check failed:', e.message); }
-    }
-    let text = await ensureLogin(page);
-    console.log('status:', text.slice(0, 300));
+  return { browser, context, page };
+}
 
-    const offline = /offline/i.test(text);
-    const renewBtn = page.locator('button:has-text("Renew for 7 days")').first();
-    const renewVisible = (await renewBtn.count()) > 0;
+async function runFlow(page) {
+  let text = await ensureLogin(page);
+  console.log('status:', text.slice(0, 300));
 
-    if (!offline && !renewVisible) {
-      console.log('bot is online and renew is not open yet - nothing to do');
-      return;
-    }
-    if (!renewVisible) {
-      console.log('renew button not found - nothing to click');
-      await shot(page, 'no-renew-button');
-      return;
-    }
+  const offline = /offline/i.test(text);
+  const renewBtn = page.locator('button:has-text("Renew for 7 days")').first();
+  const renewVisible = (await renewBtn.count()) > 0;
 
-    if (!(await passTurnstile(page))) {
-      await shot(page, 'turnstile-failed');
-      throw new Error('Turnstile check did not pass in CI browser');
-    }
-    await renewBtn.click();
-    await sleep(6000);
-    text = await bodyText(page);
-    const m = text.match(/goes offline[^.]*|expires[^.]*/i);
-    console.log('after renew:', m ? m[0] : text.slice(0, 200));
-
-    const startBtn = page.locator('button:has-text("Start"):not([disabled])').first();
-    if (await startBtn.count()) {
-      await startBtn.click();
-      console.log('start clicked');
-      for (let i = 0; i < 20; i++) {
-        await sleep(3000);
-        text = await bodyText(page);
-        if (/\bonline\b/i.test(text)) { console.log('bot is online'); break; }
-      }
-    }
-    await shot(page, 'done');
-    console.log('renew flow finished');
-  } catch (e) {
-    await shot(page, 'error');
-    console.error('FAILED:', e.message);
-    process.exitCode = 1;
-  } finally {
-    await browser.close();
-    if (proxyProc) proxyProc.kill();
+  if (!offline && !renewVisible) {
+    console.log('bot is online and renew is not open yet - nothing to do');
+    return;
   }
+  if (!renewVisible) {
+    console.log('renew button not found - nothing to click');
+    await shot(page, 'no-renew-button');
+    return;
+  }
+
+  if (!(await passTurnstile(page))) {
+    await shot(page, 'turnstile-failed');
+    throw new Error('Turnstile check did not pass in CI browser');
+  }
+  await renewBtn.click();
+  await sleep(6000);
+  text = await bodyText(page);
+  const m = text.match(/goes offline[^.]*|expires[^.]*/i);
+  console.log('after renew:', m ? m[0] : text.slice(0, 200));
+
+  const startBtn = page.locator('button:has-text("Start"):not([disabled])').first();
+  if (await startBtn.count()) {
+    await startBtn.click();
+    console.log('start clicked');
+    for (let i = 0; i < 20; i++) {
+      await sleep(3000);
+      text = await bodyText(page);
+      if (/\bonline\b/i.test(text)) { console.log('bot is online'); break; }
+    }
+  }
+  await shot(page, 'done');
+  console.log('renew flow finished');
+}
+
+(async () => {
+  let proxyProc = null;
+  try { proxyProc = await startProxy(); }
+  catch (e) { console.log('proxy start failed, continuing without proxy:', e.message); }
+  // Attempt order: via the NODE_LINK nodes first, then direct as a control -
+  // if direct passes and proxy does not, the node egress is the problem;
+  // if both fail the same way, it is the automated-browser environment.
+  const modes = proxyProc ? [true, false] : [false];
+  let lastErr = null;
+  for (const useProxy of modes) {
+    let session = null;
+    try {
+      session = await launchSession(useProxy ? proxyProc : null);
+      const { context, page } = session;
+      if (process.env.PANEL_COOKIE) {
+        try {
+          await context.addCookies(cookieHeaderToCookies(process.env.PANEL_COOKIE));
+          console.log('PANEL_COOKIE injected');
+        } catch (e) { console.log('PANEL_COOKIE parse failed:', e.message); }
+      }
+      if (useProxy) {
+        try {
+          await page.goto('https://api.ipify.org', { timeout: 20000 });
+          console.log('egress ip:', (await page.locator('body').innerText()).trim());
+        } catch (e) { console.log('egress ip check failed:', e.message); }
+      } else {
+        console.log('mode: direct (no proxy)');
+      }
+      await runFlow(page);
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      console.error(`attempt (proxy=${useProxy}) FAILED:`, e.message);
+      if (!/Turnstile check on the panel login/.test(e.message)) break;
+    } finally {
+      if (session) await session.browser.close().catch(() => {});
+    }
+  }
+  if (proxyProc) proxyProc.kill();
+  if (lastErr) process.exitCode = 1;
 })();
