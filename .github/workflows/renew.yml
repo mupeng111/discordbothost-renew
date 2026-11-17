@@ -1,0 +1,42 @@
+name: DiscordBotHost Renew
+
+# The panel only opens "Renew for 7 days" AFTER the bot goes offline,
+# so this checks twice a day: online + not due -> exit quietly;
+# offline -> renew (+7 days) and start it again.
+on:
+  schedule:
+    - cron: '23 */12 * * *'
+  workflow_dispatch:
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
+        working-directory: scripts
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Run renew flow
+        working-directory: scripts
+        env:
+          DISCORD_EMAIL: ${{ secrets.DISCORD_EMAIL }}
+          DISCORD_PASSWORD: ${{ secrets.DISCORD_PASSWORD }}
+          BOT_ID: ${{ vars.BOT_ID }}
+        run: node renew.js
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renew-screenshots
+          path: scripts/artifacts/
+          if-no-files-found: ignore
