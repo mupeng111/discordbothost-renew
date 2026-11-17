@@ -31,6 +31,7 @@ jobs:
           DISCORD_EMAIL: ${{ secrets.DISCORD_EMAIL }}
           DISCORD_PASSWORD: ${{ secrets.DISCORD_PASSWORD }}
           NODE_LINK: ${{ secrets.NODE_LINK }}
+          PANEL_COOKIE: ${{ secrets.PANEL_COOKIE }}
           BOT_ID: ${{ vars.BOT_ID }}
         run: xvfb-run -a node renew.js
 
