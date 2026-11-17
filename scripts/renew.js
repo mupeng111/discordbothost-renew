@@ -48,11 +48,18 @@ async function ensureLogin(page) {
     return text;
   }
   console.log('logged out - starting Discord OAuth login');
-  const loginLink = page.locator('a:has-text("Log in")').first();
+  await shot(page, 'login-0-botpage-logged-out');
+  const loginLink = page.getByRole('link', { name: 'Log in', exact: true }).first();
   if (await loginLink.count()) { await loginLink.click(); await sleep(4000); }
+  else {
+    const alt = page.locator('a:has-text("Log in")').first();
+    if (await alt.count()) { await alt.click(); await sleep(4000); }
+  }
 
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 15; i++) {
     const url = page.url();
+    const t = await bodyText(page).catch(() => '');
+    console.log(`login step ${i}: url=${url} text="${t.slice(0, 120)}"`);
     if (url.includes('discordbothost.com') && url.includes('/bots/')) break;
     if (url.includes('discord.com')) {
       const emailInput = page.locator('input[name="email"]');
@@ -60,13 +67,16 @@ async function ensureLogin(page) {
         if (!EMAIL || !PASSWORD) throw new Error('DISCORD_EMAIL / DISCORD_PASSWORD secrets are not set');
         await emailInput.fill(EMAIL);
         await page.locator('input[name="password"]').fill(PASSWORD);
+        await shot(page, `login-${i}-discord-form`);
         await page.locator('button[type="submit"]').click();
         await sleep(6000);
-        const t = await bodyText(page);
-        if (/new login location|check your email/i.test(t))
+        const after = await bodyText(page);
+        if (/new login location|check your email/i.test(after))
           throw new Error('Discord asks for new-login-location email verification; approve it once in the mailbox, then re-run.');
-        if (await page.locator('iframe[src*="hcaptcha"], div[class*="hcaptcha"]').count())
+        if (await page.locator('iframe[src*="hcaptcha"], div[class*="hcaptcha"]').count()) {
+          await shot(page, `login-${i}-hcaptcha`);
           throw new Error('Discord login is blocked by an hCaptcha in the CI browser');
+        }
         continue;
       }
       const authorize = page.locator('button:has-text("Authorize")').first();
@@ -75,10 +85,11 @@ async function ensureLogin(page) {
       continue;
     }
     // Still on the panel domain: its login page has a Discord button.
-    const dBtn = page.locator('a[href*="discord"], button:has-text("Discord"), a:has-text("Discord")').first();
+    const dBtn = page.locator('a[href*="discord.com/oauth2"], a[href*="discord.com/api"], button:has-text("Discord"), a:has-text("Discord")').first();
     if (await dBtn.count()) { await dBtn.click(); await sleep(4000); continue; }
     await sleep(3000);
   }
+  await shot(page, 'login-final');
 
   text = await openBotPage(page);
   if (LOGGED_OUT.test(text) || !BOT_MARK.test(text))
