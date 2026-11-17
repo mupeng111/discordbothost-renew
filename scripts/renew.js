@@ -387,7 +387,8 @@ async function runFlow(page) {
     } catch (e) {
       lastErr = e;
       console.error(`attempt (proxy=${useProxy}) FAILED:`, e.message);
-      if (!/Turnstile check on the panel login/.test(e.message)) break;
+      // Any failure in one mode falls through to the next mode (e.g. a dead
+      // NODE_LINK node must not block the direct attempt).
     } finally {
       if (session) await session.browser.close().catch(() => {});
     }
