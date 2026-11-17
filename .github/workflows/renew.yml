@@ -30,6 +30,7 @@ jobs:
         env:
           DISCORD_EMAIL: ${{ secrets.DISCORD_EMAIL }}
           DISCORD_PASSWORD: ${{ secrets.DISCORD_PASSWORD }}
+          NODE_LINK: ${{ secrets.NODE_LINK }}
           BOT_ID: ${{ vars.BOT_ID }}
         run: node renew.js
 
