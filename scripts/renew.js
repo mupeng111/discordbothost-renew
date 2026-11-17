@@ -55,11 +55,31 @@ async function turnstileToken(page) {
 }
 
 async function clickTurnstile(page) {
+  // Precise clicking: the checkbox sits at the left-center of the widget
+  // iframe. A vague body click at (30,30) can miss it entirely (v6/v7 runs
+  // left the box pristine-unchecked after 120s). Click once, then be patient:
+  // repeated clicking resets the challenge.
+  const frameEl = page.locator('iframe[src*="challenges.cloudflare.com"]').first();
+  if (await frameEl.count()) {
+    try {
+      const box = await frameEl.boundingBox();
+      if (box) { await page.mouse.click(box.x + 24, box.y + box.height / 2); return true; }
+    } catch {}
+  }
   const frame = page.frames().find(f => f.url().includes('challenges.cloudflare.com'));
   if (frame) {
-    try { await frame.locator('input[type="checkbox"], body').first()
-      .click({ position: { x: 30, y: 30 }, timeout: 5000 }); } catch {}
+    const input = frame.locator('input[type="checkbox"]').first();
+    if (await input.count()) { try { await input.click({ timeout: 5000 }); return true; } catch {} }
   }
+  return false;
+}
+
+async function turnstileState(page) {
+  const frame = page.frames().find(f => f.url().includes('challenges.cloudflare.com'));
+  if (!frame) return 'no-frame';
+  return frame.evaluate(() =>
+    document.body ? document.body.innerText.replace(/\s+/g, ' ').slice(0, 80) : ''
+  ).catch(() => 'err');
 }
 
 // ---------- NODE_LINK network environment (sing-box client) ----------
@@ -212,9 +232,11 @@ async function ensureLogin(page) {
   await emailInput.fill(EMAIL);
   await passInput.fill(PASSWORD);
   await shot(page, 'login-form-filled');
-  // The login form has its own Turnstile check - click it and wait for a token.
+  // The login form has its own Turnstile check - one precise click, then wait.
+  let clicks = 0;
   for (let i = 0; i < 40 && !(await turnstileToken(page)); i++) {
-    if (i % 5 === 0) await clickTurnstile(page);
+    if (i === 0 || (i === 15 && clicks < 2)) { if (await clickTurnstile(page)) clicks++; }
+    if (i % 5 === 0) console.log(`login turnstile wait ${i * 3}s, state: ${await turnstileState(page)}`);
     await sleep(3000);
   }
   if (!(await turnstileToken(page))) {
@@ -232,22 +254,13 @@ async function ensureLogin(page) {
 }
 
 async function passTurnstile(page) {
-  // Click the Turnstile checkbox once, then wait for the token like a human would.
-  const frame = page.frames().find(f => f.url().includes('challenges.cloudflare.com'));
-  if (frame) {
-    const box = frame.locator('input[type="checkbox"], body');
-    try { await box.first().click({ position: { x: 30, y: 30 }, timeout: 5000 }); } catch {}
-  } else {
-    const el = page.locator('text=/verify you are human/i').first();
-    if (await el.count()) { try { await el.click({ timeout: 5000 }); } catch {} }
-  }
+  // One precise click on the checkbox, then wait for the token like a human would.
+  await clickTurnstile(page);
   for (let i = 0; i < 30; i++) {
     await sleep(3000);
-    const token = await page.evaluate(() => {
-      const t = document.querySelector('textarea[name="cf-turnstile-response"], input[name="cf-turnstile-response"]');
-      return t ? t.value : '';
-    }).catch(() => '');
+    const token = await turnstileToken(page);
     if (token) { console.log('turnstile passed'); return true; }
+    if (i % 5 === 0) console.log(`renew turnstile wait ${i * 3}s, state: ${await turnstileState(page)}`);
     const enabled = await page.locator('button:has-text("Renew for 7 days"):not([disabled])').count();
     if (enabled) { console.log('renew button enabled'); return true; }
   }
