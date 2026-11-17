@@ -1,6 +1,7 @@
 // DiscordBotHost auto-renew — same steps as doing it in the browser:
-//   1. Open the panel; if logged out, go through Discord OAuth (account + password).
-//   2. Open the bot page and read its status / expiry.
+//   1. Open the bot page; if it shows the logged-out landing page instead,
+//      go through Discord OAuth (account + password) first.
+//   2. Read the bot status / expiry from the bot page.
 //   3. If it is online and the run is not about to end: nothing to do, exit 0.
 //   4. If it is offline (renew only opens then): pass the Turnstile check,
 //      click "Renew for 7 days", confirm the new expiry.
@@ -20,6 +21,7 @@ const PASSWORD = process.env.DISCORD_PASSWORD;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const LOGGED_OUT = /log in to see your bots/i;
+const BOT_MARK = /goes offline|days? left of this/i;
 
 async function shot(page, name) {
   try {
@@ -32,45 +34,57 @@ async function bodyText(page) {
   return (await page.locator('body').innerText()).replace(/\s+/g, ' ');
 }
 
-async function loginIfNeeded(page) {
-  await page.goto(PANEL, { waitUntil: 'domcontentloaded' });
+async function openBotPage(page) {
+  await page.goto(BOT_URL, { waitUntil: 'domcontentloaded' });
   await sleep(3000);
-  let text = await bodyText(page);
-  if (!LOGGED_OUT.test(text) && !page.url().includes('discord.com')) {
+  return bodyText(page);
+}
+
+// Returns the bot page text once we are really logged in.
+async function ensureLogin(page) {
+  let text = await openBotPage(page);
+  if (!LOGGED_OUT.test(text) && BOT_MARK.test(text)) {
     console.log('already logged in');
-    return;
+    return text;
   }
-  console.log('logged out — starting Discord OAuth login');
-  const loginLink = page.locator('a:has-text("Log in"), button:has-text("Log in")').first();
+  console.log('logged out - starting Discord OAuth login');
+  const loginLink = page.locator('a:has-text("Log in")').first();
   if (await loginLink.count()) { await loginLink.click(); await sleep(4000); }
 
-  // Discord OAuth page may go straight to the authorize screen when the
-  // Discord session exists, or show the email/password form first.
-  for (let i = 0; i < 10; i++) {
-    if (page.url().includes('discordbothost.com') && !page.url().includes('discord.com')) break;
-    const emailInput = page.locator('input[name="email"]');
-    if (await emailInput.count()) {
-      if (!EMAIL || !PASSWORD) throw new Error('DISCORD_EMAIL / DISCORD_PASSWORD secrets are not set');
-      await emailInput.fill(EMAIL);
-      await page.locator('input[name="password"]').fill(PASSWORD);
-      await page.locator('button[type="submit"]').click();
-      await sleep(6000);
-      text = await bodyText(page);
-      if (/new login location|check your email/i.test(text))
-        throw new Error('Discord asks for new-login-location email verification; approve it once in the mailbox, then re-run.');
-      if (/captcha|hcaptcha/i.test(text) && await page.locator('input[name="email"]').count())
-        throw new Error('Discord login is blocked by a captcha in the CI browser');
+  for (let i = 0; i < 12; i++) {
+    const url = page.url();
+    if (url.includes('discordbothost.com') && url.includes('/bots/')) break;
+    if (url.includes('discord.com')) {
+      const emailInput = page.locator('input[name="email"]');
+      if (await emailInput.count()) {
+        if (!EMAIL || !PASSWORD) throw new Error('DISCORD_EMAIL / DISCORD_PASSWORD secrets are not set');
+        await emailInput.fill(EMAIL);
+        await page.locator('input[name="password"]').fill(PASSWORD);
+        await page.locator('button[type="submit"]').click();
+        await sleep(6000);
+        const t = await bodyText(page);
+        if (/new login location|check your email/i.test(t))
+          throw new Error('Discord asks for new-login-location email verification; approve it once in the mailbox, then re-run.');
+        if (await page.locator('iframe[src*="hcaptcha"], div[class*="hcaptcha"]').count())
+          throw new Error('Discord login is blocked by an hCaptcha in the CI browser');
+        continue;
+      }
+      const authorize = page.locator('button:has-text("Authorize")').first();
+      if (await authorize.count()) { await authorize.click(); await sleep(5000); continue; }
+      await sleep(3000);
       continue;
     }
-    const authorize = page.locator('button:has-text("Authorize"), button:has-text("授权")').first();
-    if (await authorize.count()) { await authorize.click(); await sleep(5000); continue; }
+    // Still on the panel domain: its login page has a Discord button.
+    const dBtn = page.locator('a[href*="discord"], button:has-text("Discord"), a:has-text("Discord")').first();
+    if (await dBtn.count()) { await dBtn.click(); await sleep(4000); continue; }
     await sleep(3000);
   }
-  await page.goto(PANEL, { waitUntil: 'domcontentloaded' });
-  await sleep(3000);
-  text = await bodyText(page);
-  if (LOGGED_OUT.test(text)) throw new Error('login did not complete — panel still shows the logged-out page');
+
+  text = await openBotPage(page);
+  if (LOGGED_OUT.test(text) || !BOT_MARK.test(text))
+    throw new Error('login did not complete - bot page still not accessible: ' + text.slice(0, 200));
   console.log('logged in');
+  return text;
 }
 
 async function passTurnstile(page) {
@@ -80,7 +94,7 @@ async function passTurnstile(page) {
     const box = frame.locator('input[type="checkbox"], body');
     try { await box.first().click({ position: { x: 30, y: 30 }, timeout: 5000 }); } catch {}
   } else {
-    const el = page.locator('text=/verify you are human|请验证您是真人/i').first();
+    const el = page.locator('text=/verify you are human/i').first();
     if (await el.count()) { try { await el.click({ timeout: 5000 }); } catch {} }
   }
   for (let i = 0; i < 30; i++) {
@@ -100,24 +114,19 @@ async function passTurnstile(page) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   try {
-    await loginIfNeeded(page);
-    await page.goto(BOT_URL, { waitUntil: 'domcontentloaded' });
-    await sleep(3000);
-    let text = await bodyText(page);
+    let text = await ensureLogin(page);
     console.log('status:', text.slice(0, 300));
-    if (LOGGED_OUT.test(text) || !/goes offline|days? left|renew|offline|online/i.test(text))
-      throw new Error('bot page did not load — unexpected page content: ' + text.slice(0, 200));
 
     const offline = /offline/i.test(text);
     const renewBtn = page.locator('button:has-text("Renew for 7 days")').first();
     const renewVisible = (await renewBtn.count()) > 0;
 
     if (!offline && !renewVisible) {
-      console.log('bot is online and renew is not open yet — nothing to do');
+      console.log('bot is online and renew is not open yet - nothing to do');
       return;
     }
     if (!renewVisible) {
-      console.log('renew button not found — nothing to click');
+      console.log('renew button not found - nothing to click');
       await shot(page, 'no-renew-button');
       return;
     }
