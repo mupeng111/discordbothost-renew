@@ -232,6 +232,9 @@ async function ensureLogin(page) {
   await emailInput.fill(EMAIL);
   await passInput.fill(PASSWORD);
   await shot(page, 'login-form-filled');
+  // Wait until the Turnstile widget iframe actually exists before clicking.
+  await page.waitForSelector('iframe[src*="challenges.cloudflare.com"]', { timeout: 30000 }).catch(() => {});
+  await sleep(2000);
   // The login form has its own Turnstile check - one precise click, then wait.
   let clicks = 0;
   for (let i = 0; i < 40 && !(await turnstileToken(page)); i++) {
@@ -272,18 +275,29 @@ async function passTurnstile(page) {
   try { proxyProc = await startProxy(); }
   catch (e) { console.log('proxy start failed, continuing without proxy:', e.message); }
   const launchArgs = ['--disable-blink-features=AutomationControlled', '--no-sandbox'];
-  const launchOpts = { headless: false, args: launchArgs };
-  if (proxyProc) launchOpts.proxy = { server: 'http://127.0.0.1:10808' };
-  let browser;
-  try { browser = await chromium.launch(launchOpts); }
-  catch (e) {
-    console.log('headed launch failed, falling back to headless:', e.message);
-    browser = await chromium.launch({ ...launchOpts, headless: true });
+  const baseOpts = { headless: false, args: launchArgs };
+  if (proxyProc) baseOpts.proxy = { server: 'http://127.0.0.1:10808' };
+  // Real Google Chrome passes Turnstile far more often than Playwright's
+  // bundled Chromium; fall back step by step if a launch fails.
+  let browser = null;
+  const attempts = [
+    ['chrome (headed)', { ...baseOpts, channel: 'chrome' }],
+    ['chromium (headed)', { ...baseOpts }],
+    ['chrome (headless)', { ...baseOpts, channel: 'chrome', headless: true }],
+    ['chromium (headless)', { ...baseOpts, headless: true }],
+  ];
+  for (const [name, opts] of attempts) {
+    try { browser = await chromium.launch(opts); console.log('browser:', name); break; }
+    catch (e) { console.log('launch failed:', name, '-', e.message.split('\n')[0]); }
   }
+  if (!browser) throw new Error('no browser could be launched');
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     locale: 'en-US',
     viewport: { width: 1280, height: 800 },
+  });
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
   const page = await context.newPage();
   try {
