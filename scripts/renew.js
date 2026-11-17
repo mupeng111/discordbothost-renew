@@ -19,6 +19,7 @@ const EMAIL = process.env.DISCORD_EMAIL;
 const PASSWORD = process.env.DISCORD_PASSWORD;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const LOGGED_OUT = /log in to see your bots/i;
 
 async function shot(page, name) {
   try {
@@ -34,15 +35,19 @@ async function bodyText(page) {
 async function loginIfNeeded(page) {
   await page.goto(PANEL, { waitUntil: 'domcontentloaded' });
   await sleep(3000);
-  if (!page.url().includes('discord.com') &&
-      !(await page.locator('text=/login with discord/i').count())) {
+  let text = await bodyText(page);
+  if (!LOGGED_OUT.test(text) && !page.url().includes('discord.com')) {
     console.log('already logged in');
     return;
   }
-  const loginBtn = page.locator('a[href*="discord"], button:has-text("Discord")').first();
-  if (await loginBtn.count()) { await loginBtn.click(); await sleep(4000); }
+  console.log('logged out — starting Discord OAuth login');
+  const loginLink = page.locator('a:has-text("Log in"), button:has-text("Log in")').first();
+  if (await loginLink.count()) { await loginLink.click(); await sleep(4000); }
 
-  if (page.url().includes('discord.com')) {
+  // Discord OAuth page may go straight to the authorize screen when the
+  // Discord session exists, or show the email/password form first.
+  for (let i = 0; i < 10; i++) {
+    if (page.url().includes('discordbothost.com') && !page.url().includes('discord.com')) break;
     const emailInput = page.locator('input[name="email"]');
     if (await emailInput.count()) {
       if (!EMAIL || !PASSWORD) throw new Error('DISCORD_EMAIL / DISCORD_PASSWORD secrets are not set');
@@ -50,13 +55,21 @@ async function loginIfNeeded(page) {
       await page.locator('input[name="password"]').fill(PASSWORD);
       await page.locator('button[type="submit"]').click();
       await sleep(6000);
+      text = await bodyText(page);
+      if (/new login location|check your email/i.test(text))
+        throw new Error('Discord asks for new-login-location email verification; approve it once in the mailbox, then re-run.');
+      if (/captcha|hcaptcha/i.test(text) && await page.locator('input[name="email"]').count())
+        throw new Error('Discord login is blocked by a captcha in the CI browser');
+      continue;
     }
-    if ((await bodyText(page)).match(/new login location|check your email/i))
-      throw new Error('Discord asks for new-login-location email verification; approve it once in the mailbox, then re-run.');
     const authorize = page.locator('button:has-text("Authorize"), button:has-text("授权")').first();
-    if (await authorize.count()) { await authorize.click(); await sleep(5000); }
+    if (await authorize.count()) { await authorize.click(); await sleep(5000); continue; }
+    await sleep(3000);
   }
-  await page.waitForURL(/discordbothost\.com/, { timeout: 60000 });
+  await page.goto(PANEL, { waitUntil: 'domcontentloaded' });
+  await sleep(3000);
+  text = await bodyText(page);
+  if (LOGGED_OUT.test(text)) throw new Error('login did not complete — panel still shows the logged-out page');
   console.log('logged in');
 }
 
@@ -92,6 +105,8 @@ async function passTurnstile(page) {
     await sleep(3000);
     let text = await bodyText(page);
     console.log('status:', text.slice(0, 300));
+    if (LOGGED_OUT.test(text) || !/goes offline|days? left|renew|offline|online/i.test(text))
+      throw new Error('bot page did not load — unexpected page content: ' + text.slice(0, 200));
 
     const offline = /offline/i.test(text);
     const renewBtn = page.locator('button:has-text("Renew for 7 days")').first();
