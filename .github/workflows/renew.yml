@@ -23,7 +23,7 @@ jobs:
         working-directory: scripts
         run: |
           npm install
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps chromium chrome
 
       - name: Run renew flow
         working-directory: scripts
