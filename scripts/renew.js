@@ -213,8 +213,8 @@ async function ensureLogin(page) {
   await passInput.fill(PASSWORD);
   await shot(page, 'login-form-filled');
   // The login form has its own Turnstile check - click it and wait for a token.
-  for (let i = 0; i < 20 && !(await turnstileToken(page)); i++) {
-    if (i === 0) await clickTurnstile(page);
+  for (let i = 0; i < 40 && !(await turnstileToken(page)); i++) {
+    if (i % 5 === 0) await clickTurnstile(page);
     await sleep(3000);
   }
   if (!(await turnstileToken(page))) {
@@ -258,10 +258,21 @@ async function passTurnstile(page) {
   let proxyProc = null;
   try { proxyProc = await startProxy(); }
   catch (e) { console.log('proxy start failed, continuing without proxy:', e.message); }
-  const launchOpts = { headless: true };
+  const launchArgs = ['--disable-blink-features=AutomationControlled', '--no-sandbox'];
+  const launchOpts = { headless: false, args: launchArgs };
   if (proxyProc) launchOpts.proxy = { server: 'http://127.0.0.1:10808' };
-  const browser = await chromium.launch(launchOpts);
-  const page = await browser.newPage();
+  let browser;
+  try { browser = await chromium.launch(launchOpts); }
+  catch (e) {
+    console.log('headed launch failed, falling back to headless:', e.message);
+    browser = await chromium.launch({ ...launchOpts, headless: true });
+  }
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    locale: 'en-US',
+    viewport: { width: 1280, height: 800 },
+  });
+  const page = await context.newPage();
   try {
     if (proxyProc) {
       try {
