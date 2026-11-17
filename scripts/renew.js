@@ -56,36 +56,41 @@ async function ensureLogin(page) {
     if (await alt.count()) { await alt.click(); await sleep(4000); }
   }
 
+  let active = page;
   for (let i = 0; i < 15; i++) {
-    const url = page.url();
-    const t = await bodyText(page).catch(() => '');
+    // OAuth may open in a popup tab - adopt it when it appears.
+    for (const p of page.context().pages()) {
+      if (p.url().includes('discord.com')) { active = p; break; }
+    }
+    const url = active.url();
+    const t = await bodyText(active).catch(() => '');
     console.log(`login step ${i}: url=${url} text="${t.slice(0, 120)}"`);
     if (url.includes('discordbothost.com') && url.includes('/bots/')) break;
     if (url.includes('discord.com')) {
-      const emailInput = page.locator('input[name="email"]');
+      const emailInput = active.locator('input[name="email"]');
       if (await emailInput.count()) {
         if (!EMAIL || !PASSWORD) throw new Error('DISCORD_EMAIL / DISCORD_PASSWORD secrets are not set');
         await emailInput.fill(EMAIL);
-        await page.locator('input[name="password"]').fill(PASSWORD);
-        await shot(page, `login-${i}-discord-form`);
-        await page.locator('button[type="submit"]').click();
+        await active.locator('input[name="password"]').fill(PASSWORD);
+        await shot(active, `login-${i}-discord-form`);
+        await active.locator('button[type="submit"]').click();
         await sleep(6000);
-        const after = await bodyText(page);
+        const after = await bodyText(active);
         if (/new login location|check your email/i.test(after))
           throw new Error('Discord asks for new-login-location email verification; approve it once in the mailbox, then re-run.');
-        if (await page.locator('iframe[src*="hcaptcha"], div[class*="hcaptcha"]').count()) {
-          await shot(page, `login-${i}-hcaptcha`);
+        if (await active.locator('iframe[src*="hcaptcha"], div[class*="hcaptcha"]').count()) {
+          await shot(active, `login-${i}-hcaptcha`);
           throw new Error('Discord login is blocked by an hCaptcha in the CI browser');
         }
         continue;
       }
-      const authorize = page.locator('button:has-text("Authorize")').first();
+      const authorize = active.locator('button:has-text("Authorize")').first();
       if (await authorize.count()) { await authorize.click(); await sleep(5000); continue; }
       await sleep(3000);
       continue;
     }
-    // Still on the panel domain: its login page has a Discord button.
-    const dBtn = page.locator('a[href*="discord.com/oauth2"], a[href*="discord.com/api"], button:has-text("Discord"), a:has-text("Discord")').first();
+    // Still on the panel login page: click the exact "Continue with Discord".
+    const dBtn = page.locator('button:has-text("Continue with Discord"), a:has-text("Continue with Discord")').first();
     if (await dBtn.count()) { await dBtn.click(); await sleep(4000); continue; }
     await sleep(3000);
   }
