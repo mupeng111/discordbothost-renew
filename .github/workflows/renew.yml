@@ -32,7 +32,7 @@ jobs:
           DISCORD_PASSWORD: ${{ secrets.DISCORD_PASSWORD }}
           NODE_LINK: ${{ secrets.NODE_LINK }}
           BOT_ID: ${{ vars.BOT_ID }}
-        run: node renew.js
+        run: xvfb-run -a node renew.js
 
       - name: Upload screenshots
         if: always()
