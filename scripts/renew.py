@@ -381,6 +381,9 @@ def shot(sb, name):
 
 
 def page_text(sb):
+    t = js(sb, "return document.body ? (document.body.innerText || '') : '';", "")
+    if isinstance(t, str) and t.strip():
+        return re.sub(r"\s+", " ", t)
     try:
         return re.sub(r"\s+", " ", sb.get_page_text())
     except Exception:
@@ -411,7 +414,7 @@ def ensure_login(sb):
     sb.sleep(3)
     shot(sb, "login-form-filled")
     if wait_turnstile_present(sb):
-        if not solve_turnstile(sb, timeout=90, tag="login turnstile"):
+        if not solve_turnstile(sb, timeout=120, tag="login turnstile"):
             try:
                 sb.cdp.click_captcha()
                 sb.sleep(4)
@@ -423,6 +426,18 @@ def ensure_login(sb):
         log("login turnstile passed")
     else:
         log("no turnstile detected on login form")
+    # Make sure the form still holds the credentials (widget interaction can
+    # coincide with a re-render that clears the inputs).
+    lens = js(sb, "var e=document.querySelector('input[type=\"email\"]'),"
+                  "p=document.querySelector('input[type=\"password\"]');"
+                  "return (e?e.value.length:0) + '|' + (p?p.value.length:0);", "")
+    log("form field lengths:", lens)
+    parts = str(lens).split("|")
+    if len(parts) == 2 and (parts[0] == "0" or parts[1] == "0"):
+        log("form was cleared - refilling")
+        sb.input('input[type="email"]', EMAIL)
+        sb.input('input[type="password"]', PASSWORD)
+        sb.sleep(1)
     try:
         sb.click('button:contains("Log in")')
     except Exception:
@@ -430,10 +445,12 @@ def ensure_login(sb):
     log("login submitted")
     sb.sleep(6)
     sb.wait_for_ready_state_complete()
+    shot(sb, "after-login")
+    log("after login url:", sb.get_current_url())
     text = open_bot_page(sb)
     if LOGGED_OUT.search(text) or not BOT_MARK.search(text):
-        raise RuntimeError("panel login did not complete - bot page still not "
-                           "accessible: " + text[:200])
+        raise RuntimeError("panel login did not complete - url=" +
+                           sb.get_current_url() + " text: " + text[:200])
     log("logged in")
     return text
 
