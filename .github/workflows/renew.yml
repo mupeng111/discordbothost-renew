@@ -10,33 +10,36 @@ on:
 
 jobs:
   renew:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: scripts
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: '20'
+          python-version: '3.12'
 
-      - name: Install Playwright
-        working-directory: scripts
+      - name: Install system and Python dependencies
         run: |
-          npm install
-          npx playwright install --with-deps chromium chrome
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk
+          pip install -r requirements.txt
+          seleniumbase install chromedriver
 
       - name: Run renew flow
-        working-directory: scripts
         env:
           DISCORD_EMAIL: ${{ secrets.DISCORD_EMAIL }}
           DISCORD_PASSWORD: ${{ secrets.DISCORD_PASSWORD }}
           NODE_LINK: ${{ secrets.NODE_LINK }}
-          PANEL_COOKIE: ${{ secrets.PANEL_COOKIE }}
           BOT_ID: ${{ vars.BOT_ID }}
-        run: xvfb-run -a node renew.js
+        run: xvfb-run --auto-servernum python3 renew.py
 
       - name: Upload screenshots
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: renew-screenshots
