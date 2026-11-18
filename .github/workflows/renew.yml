@@ -1,11 +1,10 @@
 name: DiscordBotHost Renew
 
-# The panel only opens "Renew for 7 days" AFTER the bot goes offline,
-# so this checks twice a day: online + not due -> exit quietly;
-# offline -> renew (+7 days) and start it again.
+# Runs every two days at 09:00 Asia/Shanghai. Each run logs in, scans
+# for a Renew control and renews whenever one is available (no need to
+# wait for the bot to go offline), then verifies the new expiry.
 on:
   schedule:
-    - cron: '23 */12 * * *'
     - cron: '0 1 */2 * *'  # 09:00 Asia/Shanghai (01:00 UTC), every two days
   workflow_dispatch:
 
