@@ -366,9 +366,15 @@ def solve_turnstile(sb, timeout=90, tag="turnstile", first_wait=8):
             click_turnstile(sb)
             next_click = time.time() + 10 + random.uniform(0, 3)
         time.sleep(2)
-    ok = bool(turnstile_token(sb))
-    log(f"{tag} {'passed' if ok else 'FAILED'}")
-    return ok
+    # The token often lands a few seconds after the last click - grace poll.
+    grace_end = time.time() + 6
+    while time.time() < grace_end:
+        if turnstile_token(sb):
+            log(f"{tag} passed (token acquired)")
+            return True
+        time.sleep(1.5)
+    log(f"{tag} FAILED")
+    return False
 
 
 # ---------- Panel flow ----------
@@ -455,25 +461,44 @@ def ensure_login(sb):
     return text
 
 
+def _visible(sb, sel):
+    try:
+        return bool(sb.is_element_visible(sel))
+    except Exception:
+        return False
+
+
+def _wait_online(sb):
+    for _ in range(20):
+        sb.sleep(3)
+        text = page_text(sb)
+        if re.search(r"goes offline", text, re.I):
+            log("bot is online")
+            return True
+    return False
+
+
 def run_flow(sb):
     text = ensure_login(sb)
-    log("status:", text[:300])
-    offline = bool(re.search(r"offline", text, re.I))
+    m = re.search(r"goes offline[^.]{0,140}|days? left of this[^.]{0,80}", text, re.I)
+    log("status:", m.group(0) if m else text[:300])
     renew_sel = '//button[normalize-space()="Renew for 7 days"]'
-    renew_visible = False
-    try:
-        renew_visible = sb.is_element_visible(renew_sel)
-    except Exception:
-        pass
-    if not offline and not renew_visible:
+    start_sel = '//button[normalize-space()="Start"]'
+    renew_visible = _visible(sb, renew_sel)
+    start_visible = _visible(sb, start_sel)
+    if not renew_visible and not start_visible:
         log("bot is online and renew is not open yet - nothing to do")
         return
-    if not renew_visible:
-        log("renew button not found - nothing to click")
-        shot(sb, "no-renew-button")
+    if not renew_visible and start_visible:
+        # Stopped but not expired: just start it again.
+        sb.click(start_sel)
+        log("start clicked")
+        _wait_online(sb)
+        shot(sb, "done")
+        log("renew flow finished")
         return
     if wait_turnstile_present(sb):
-        if not solve_turnstile(sb, timeout=90, tag="renew turnstile"):
+        if not solve_turnstile(sb, timeout=120, tag="renew turnstile"):
             shot(sb, "turnstile-failed")
             raise RuntimeError("Turnstile check did not pass")
         log("renew turnstile passed")
@@ -483,19 +508,10 @@ def run_flow(sb):
     text = page_text(sb)
     m = re.search(r"goes offline[^.]*|expires[^.]*", text, re.I)
     log("after renew:", m.group(0) if m else text[:200])
-    start_sel = '//button[normalize-space()="Start"]'
-    try:
-        if sb.is_element_visible(start_sel):
-            sb.click(start_sel)
-            log("start clicked")
-            for _ in range(20):
-                sb.sleep(3)
-                text = page_text(sb)
-                if re.search(r"\bonline\b", text, re.I):
-                    log("bot is online")
-                    break
-    except Exception as e:
-        log(f"start step skipped: {e}")
+    if _visible(sb, start_sel):
+        sb.click(start_sel)
+        log("start clicked")
+        _wait_online(sb)
     shot(sb, "done")
     log("renew flow finished")
 
