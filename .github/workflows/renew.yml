@@ -1,11 +1,11 @@
 name: DiscordBotHost Renew
 
-# Runs every two days at 09:00 Asia/Shanghai. Each run logs in, scans
+# Runs daily at 09:00 Asia/Shanghai. Each run logs in, scans
 # for a Renew control and renews whenever one is available (no need to
 # wait for the bot to go offline), then verifies the new expiry.
 on:
   schedule:
-    - cron: '0 1 */2 * *'  # 09:00 Asia/Shanghai (01:00 UTC), every two days
+    - cron: '0 1 * * *'  # 09:00 Asia/Shanghai (01:00 UTC), daily
   workflow_dispatch:
 
 jobs:
