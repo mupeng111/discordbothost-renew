@@ -26,7 +26,7 @@ jobs:
       - name: Install system and Python dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk
+          sudo apt-get install -y xvfb x11-utils xdotool scrot
           pip install -r requirements.txt
           seleniumbase install chromedriver
 
