@@ -14,12 +14,16 @@
 #   5. If stopped after renewing: click Start, wait until Online.
 # Secrets: DISCORD_EMAIL / DISCORD_PASSWORD (panel account), NODE_LINK,
 #          BOT_ID (default 8edd6402)
+# Optional: TG_BOT_TOKEN / TG_CHAT_ID for Telegram result notifications
+#          (same notification logic as the reference project; no-op unset).
 import os, re, sys, time, json, random, subprocess, tarfile, urllib.request
 
 from seleniumbase import SB
 
 EMAIL = os.environ.get("DISCORD_EMAIL") or ""
 PASSWORD = os.environ.get("DISCORD_PASSWORD") or ""
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
 BOT_ID = os.environ.get("BOT_ID") or "8edd6402"
 PANEL = "https://my.discordbothost.com"
 BOT_URL = f"{PANEL}/bots/{BOT_ID}"
@@ -32,6 +36,40 @@ BOT_MARK = re.compile(r"goes offline|days? left of this", re.I)
 
 def log(*a):
     print(*a, flush=True)
+
+
+# ---------- Telegram notification (reference project's logic) ----------
+def _masked_email():
+    if "@" in EMAIL:
+        name, domain = EMAIL.split("@", 1)
+        if len(name) > 4:
+            return f"{name[:2]}****{name[-2:]}@{domain}"
+        return f"{name}@{domain}"
+    return (EMAIL[:2] + "****") if EMAIL else ""
+
+
+def notify(status, extra="", expiry=""):
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() + 8 * 3600))
+    lines = ["💗主人，DiscordBotHost 续期通知", "", status,
+             f"👤 登录账户: {_masked_email()}"]
+    if expiry:
+        lines.append(f"📅 到期时间: {expiry}")
+    if extra:
+        lines.append(extra)
+    lines.append(f"⏱️ 登录时间: {now}")
+    log("notify:", status, "| expiry:", expiry or "(none)")
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        log("telegram not configured - notification skipped")
+        return
+    try:
+        data = json.dumps({"chat_id": TG_CHAT_ID, "text": "\n".join(lines)}).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+            data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+        log("telegram notification sent")
+    except Exception as e:
+        log(f"telegram notification failed: {e}")
 
 
 # ---------- NODE_LINK network environment (sing-box client) ----------
@@ -478,16 +516,30 @@ def _wait_online(sb):
     return False
 
 
+def expiry_snippet(text):
+    m = re.search(r"goes offline on\s*(\d{4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}(:\d{2})?)",
+                  text, re.I)
+    if m:
+        return "goes offline on " + m.group(1)
+    m = re.search(r"(\d+)\s*days? left", text, re.I)
+    if m:
+        return m.group(0)
+    m = re.search(r"goes offline[^.]{0,140}", text, re.I)
+    return m.group(0).strip() if m else ""
+
+
 def run_flow(sb):
     text = ensure_login(sb)
-    m = re.search(r"goes offline[^.]{0,140}|days? left of this[^.]{0,80}", text, re.I)
-    log("status:", m.group(0) if m else text[:300])
+    before = expiry_snippet(text)
+    log("status:", before or text[:300])
+    log("remaining:", before or "(unknown)")
     renew_sel = '//button[normalize-space()="Renew for 7 days"]'
     start_sel = '//button[normalize-space()="Start"]'
     renew_visible = _visible(sb, renew_sel)
     start_visible = _visible(sb, start_sel)
     if not renew_visible and not start_visible:
         log("bot is online and renew is not open yet - nothing to do")
+        notify("⏳ 未到续期时间", expiry=before)
         return
     if not renew_visible and start_visible:
         # Stopped but not expired: just start it again.
@@ -495,8 +547,11 @@ def run_flow(sb):
         log("start clicked")
         _wait_online(sb)
         shot(sb, "done")
+        notify("✅ 已重新启动", expiry=expiry_snippet(page_text(sb)) or before)
         log("renew flow finished")
         return
+    # Renew is open: read the expiry BEFORE, renew, then read it again and
+    # compare - the reference project's success test.
     if wait_turnstile_present(sb):
         if not solve_turnstile(sb, timeout=120, tag="renew turnstile"):
             shot(sb, "turnstile-failed")
@@ -505,14 +560,20 @@ def run_flow(sb):
     sb.click(renew_sel)
     log("renew clicked")
     sb.sleep(6)
-    text = page_text(sb)
-    m = re.search(r"goes offline[^.]*|expires[^.]*", text, re.I)
-    log("after renew:", m.group(0) if m else text[:200])
+    text = open_bot_page(sb)
+    after = expiry_snippet(text)
+    log("after renew:", after or text[:200])
+    log("remaining:", after or "(unknown)")
     if _visible(sb, start_sel):
         sb.click(start_sel)
         log("start clicked")
         _wait_online(sb)
     shot(sb, "done")
+    if after and after != before:
+        notify("✅ 续期成功", extra="到期时间已更新", expiry=after)
+    else:
+        notify("⚠️ 续期结果未知", extra="到期时间未变化，请手动检查",
+               expiry=after or before)
     log("renew flow finished")
 
 
@@ -552,6 +613,7 @@ def main():
     if proxy_proc:
         proxy_proc.kill()
     if last_err:
+        notify("❌ 续期失败", extra=f"错误信息: {type(last_err).__name__}: {last_err}")
         sys.exit(1)
 
 
