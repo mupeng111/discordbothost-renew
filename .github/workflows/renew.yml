@@ -6,12 +6,16 @@ name: DiscordBotHost Renew
 on:
   schedule:
     - cron: '23 */12 * * *'
+    - cron: '0 1 */2 * *'  # 09:00 Asia/Shanghai (01:00 UTC), every two days
   workflow_dispatch:
 
 jobs:
   renew:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    permissions:
+      actions: write
+      contents: read
     defaults:
       run:
         working-directory: scripts
@@ -35,6 +39,8 @@ jobs:
           DISCORD_EMAIL: ${{ secrets.DISCORD_EMAIL }}
           DISCORD_PASSWORD: ${{ secrets.DISCORD_PASSWORD }}
           NODE_LINK: ${{ secrets.NODE_LINK }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           BOT_ID: ${{ vars.BOT_ID }}
         run: xvfb-run --auto-servernum python3 renew.py
 
@@ -45,3 +51,31 @@ jobs:
           name: renew-screenshots
           path: scripts/artifacts/
           if-no-files-found: ignore
+
+      - name: Clean up processes and temp files
+        if: always()
+        run: |
+          pkill -f sing-box || true
+          pkill -f chromedriver || true
+          pkill -f chrome || true
+          rm -f proxy-config.json
+          rm -rf bin artifacts
+
+      - name: Delete old workflow runs and caches
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "Deleting old run: $run_id"
+              gh run delete "$run_id" || true
+            fi
+          done
+          for cache_id in $(gh cache list --limit 100 --json id --jq '.[].id'); do
+            echo "Deleting cache: $cache_id"
+            gh cache delete "$cache_id" || true
+          done
