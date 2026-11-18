@@ -9,9 +9,10 @@
 #   1. Open the bot page; if logged out, log in with the panel's own
 #      account + password form (/auth/login), solving its Turnstile.
 #   2. Read the bot status / expiry from the bot page (positive evidence).
-#   3. Online + renew not open: nothing to do.
-#   4. Offline: solve Turnstile, click "Renew for 7 days", verify new expiry.
-#   5. If stopped after renewing: click Start, wait until Online.
+#   3. Scan for ANY Renew control (bot page, then billing page) - renewing
+#      does not wait for the bot to go offline. Cooldown text -> not yet;
+#      a clickable Renew -> solve Turnstile, click, verify expiry changed.
+#   4. If stopped: click Start, wait until Online.
 # Secrets: DISCORD_EMAIL / DISCORD_PASSWORD (panel account), NODE_LINK,
 #          BOT_ID (default 8edd6402)
 # Optional: TG_BOT_TOKEN / TG_CHAT_ID for Telegram result notifications
@@ -521,6 +522,10 @@ def expiry_snippet(text):
                   text, re.I)
     if m:
         return "goes offline on " + m.group(1)
+    m = re.search(r"goes offline\s+([A-Z][a-z]{2},?\s+[A-Z][a-z]{2}\s+\d{1,2},?\s+"
+                  r"\d{1,2}:\d{2}\s*[AP]M(?:\s*[A-Z]{2,4})?)", text)
+    if m:
+        return "goes offline " + m.group(1)
     m = re.search(r"(\d+)\s*days? left", text, re.I)
     if m:
         return m.group(0)
@@ -528,38 +533,127 @@ def expiry_snippet(text):
     return m.group(0).strip() if m else ""
 
 
+RENEW_CANDIDATES_JS = """
+var out = [];
+var els = document.querySelectorAll('button, a, [role="button"]');
+for (var i = 0; i < els.length; i++) {
+    var t = (els[i].innerText || '').replace(/\\s+/g, ' ').trim();
+    if (t && /renew/i.test(t) && els[i].offsetParent !== null) out.push(t);
+}
+return out;
+"""
+
+CLICK_RENEW_JS = """
+var els = document.querySelectorAll('button, a, [role="button"]');
+for (var i = 0; i < els.length; i++) {
+    var t = (els[i].innerText || '').replace(/\\s+/g, ' ').trim();
+    if (t && /renew/i.test(t) && !/renew in|cooldown/i.test(t)
+        && !/\\$|pay|upgrade|buy/i.test(t) && els[i].offsetParent !== null) {
+        els[i].scrollIntoView({block: 'center'});
+        els[i].click();
+        return t;
+    }
+}
+return '';
+"""
+
+BILLING_LINK_JS = """
+var as = document.querySelectorAll('a');
+for (var i = 0; i < as.length; i++) {
+    if ((as[i].innerText || '').trim() === 'Billing') { as[i].click(); return true; }
+}
+return false;
+"""
+
+DIALOG_TEXT_JS = """
+var d = document.querySelector('div[role="dialog"]');
+return d ? (d.innerText || '').replace(/\\s+/g, ' ').slice(0, 300) : '';
+"""
+
+DIALOG_CONFIRM_JS = """
+var d = document.querySelector('div[role="dialog"]');
+if (!d) return '';
+var bs = d.querySelectorAll('button');
+for (var i = 0; i < bs.length; i++) {
+    var t = (bs[i].innerText || '').trim();
+    if (/renew|confirm/i.test(t) && !/\\$|pay|upgrade|buy/i.test(t)) {
+        bs[i].click();
+        return t;
+    }
+}
+return '';
+"""
+
+
+def scan_renew_candidates(sb, where):
+    cands = js(sb, RENEW_CANDIDATES_JS, []) or []
+    for c in cands:
+        log(f"renew candidate ({where}):", c)
+    return cands
+
+
 def run_flow(sb):
     text = ensure_login(sb)
     before = expiry_snippet(text)
     log("status:", before or text[:300])
     log("remaining:", before or "(unknown)")
-    renew_sel = '//button[normalize-space()="Renew for 7 days"]'
     start_sel = '//button[normalize-space()="Start"]'
-    renew_visible = _visible(sb, renew_sel)
-    start_visible = _visible(sb, start_sel)
-    if not renew_visible and not start_visible:
-        log("bot is online and renew is not open yet - nothing to do")
-        notify("⏳ 未到续期时间", expiry=before)
-        return
-    if not renew_visible and start_visible:
-        # Stopped but not expired: just start it again.
-        sb.click(start_sel)
-        log("start clicked")
-        _wait_online(sb)
+
+    # Do not wait for the bot to go offline: scan for ANY Renew control on
+    # the bot page first, then on the billing page, and renew whenever a
+    # clickable one exists.
+    candidates = scan_renew_candidates(sb, "bot page")
+    if not candidates:
+        if js(sb, BILLING_LINK_JS, False):
+            sb.sleep(4)
+            sb.wait_for_ready_state_complete()
+            candidates = scan_renew_candidates(sb, "billing page")
+
+    cooldown = None
+    action = None
+    for c in candidates:
+        m = re.search(r"(?:renew in|renewal cooldown)\s*(\d{1,2}:\d{2}:\d{2})", c, re.I)
+        if m:
+            cooldown = m.group(1)
+        elif not re.search(r"\$|pay|upgrade|buy", c, re.I):
+            action = c
+
+    if action is None:
+        if cooldown:
+            log("renew cooldown remaining:", cooldown)
+            notify("⏳ 未到续期时间", extra=f"⏱️ 可续期时间: {cooldown}后",
+                   expiry=before)
+        elif _visible(sb, start_sel):
+            # Stopped but not expired: just start it again.
+            sb.click(start_sel)
+            log("start clicked")
+            _wait_online(sb)
+            notify("✅ 已重新启动", expiry=expiry_snippet(page_text(sb)) or before)
+        else:
+            log("no renew control available - nothing to renew this run")
+            notify("⏳ 未到续期时间", expiry=before)
         shot(sb, "done")
-        notify("✅ 已重新启动", expiry=expiry_snippet(page_text(sb)) or before)
         log("renew flow finished")
         return
-    # Renew is open: read the expiry BEFORE, renew, then read it again and
-    # compare - the reference project's success test.
+
+    # A renew action exists: read expiry BEFORE, solve the check, click,
+    # then read the expiry again and compare (reference project's test).
     if wait_turnstile_present(sb):
         if not solve_turnstile(sb, timeout=120, tag="renew turnstile"):
             shot(sb, "turnstile-failed")
             raise RuntimeError("Turnstile check did not pass")
         log("renew turnstile passed")
-    sb.click(renew_sel)
-    log("renew clicked")
-    sb.sleep(6)
+    clicked = js(sb, CLICK_RENEW_JS, "")
+    log("renew clicked:", clicked)
+    sb.sleep(5)
+    dlg = js(sb, DIALOG_TEXT_JS, "")
+    if dlg:
+        log("renew dialog:", dlg)
+        if not re.search(r"\$|pay now|upgrade|buy", dlg, re.I):
+            ok = js(sb, DIALOG_CONFIRM_JS, "")
+            if ok:
+                log("renew dialog confirmed:", ok)
+                sb.sleep(5)
     text = open_bot_page(sb)
     after = expiry_snippet(text)
     log("after renew:", after or text[:200])
