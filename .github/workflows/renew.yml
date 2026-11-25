@@ -44,7 +44,7 @@ jobs:
         run: xvfb-run --auto-servernum python3 renew.py
 
       - name: Upload screenshots
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: renew-screenshots
