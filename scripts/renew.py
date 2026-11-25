@@ -12,6 +12,10 @@
 #   3. Scan for ANY Renew control (bot page, then billing page) - renewing
 #      does not wait for the bot to go offline. Cooldown text -> not yet;
 #      a clickable Renew -> solve Turnstile, click, verify expiry changed.
+#      v18: scan any element (not only button/a), shadow DOM, More/Actions
+#      menu, billing URL and bot list; on no-control, log all visible
+#      controls + page text and save a screenshot that is uploaded on
+#      every run, so a "success" that renews nothing still leaves evidence.
 #   4. If stopped: click Start, wait until Online.
 # Secrets: DISCORD_EMAIL / DISCORD_PASSWORD (panel account), NODE_LINK,
 #          BOT_ID (default 8edd6402)
@@ -534,27 +538,80 @@ def expiry_snippet(text):
 
 
 RENEW_CANDIDATES_JS = """
+// v18: widen the scan. v17 only looked at button/a/[role="button"] and
+// missed the control twice after the bot went offline (#26, #27), so now
+// scan EVERY element whose own text mentions renew/extend, including
+// div/span/li items, elements inside shadow roots, and controls that only
+// appear after opening a More/Actions menu. Visibility is judged by
+// bounding rect, not offsetParent alone (fixed-position controls have a
+// null offsetParent in some layouts).
 var out = [];
-var els = document.querySelectorAll('button, a, [role="button"]');
+function vis(el) {
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+}
+function walk(root) {
+    var els = root.querySelectorAll('*');
+    for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        var t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+        // Only the element's own text, not a container repeating a child's.
+        var own = Array.prototype.filter.call(el.childNodes, function(n) {
+            return n.nodeType === 3 && (n.textContent || '').trim();
+        }).map(function(n) { return n.textContent.trim(); }).join(' ');
+        var label = own || t;
+        if (label && /renew|extend/i.test(label) && vis(el)) out.push(label);
+        if (el.shadowRoot) walk(el.shadowRoot);
+    }
+}
+walk(document);
+return Array.from(new Set(out));
+"""
+
+ALL_CONTROLS_JS = """
+// Diagnostic dump when no Renew is found: every visible clickable label
+// on the page, so the log alone shows what the panel actually offered.
+var out = [];
+var els = document.querySelectorAll('button, a, [role="button"], input[type="submit"]');
 for (var i = 0; i < els.length; i++) {
-    var t = (els[i].innerText || '').replace(/\\s+/g, ' ').trim();
-    if (t && /renew/i.test(t) && els[i].offsetParent !== null) out.push(t);
+    var t = (els[i].innerText || els[i].value || '').replace(/\\s+/g, ' ').trim();
+    var r = els[i].getBoundingClientRect();
+    if (t && r.width > 0 && r.height > 0) out.push(t);
 }
 return out;
 """
 
 CLICK_RENEW_JS = """
-var els = document.querySelectorAll('button, a, [role="button"]');
-for (var i = 0; i < els.length; i++) {
-    var t = (els[i].innerText || '').replace(/\\s+/g, ' ').trim();
-    if (t && /renew/i.test(t) && !/renew in|cooldown/i.test(t)
-        && !/\\$|pay|upgrade|buy/i.test(t) && els[i].offsetParent !== null) {
-        els[i].scrollIntoView({block: 'center'});
-        els[i].click();
-        return t;
-    }
+// v18: same widened match as the scan - any visible element whose own
+// text says renew/extend, not only button/a. Skip pay/upgrade/cooldown.
+function vis(el) {
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
 }
-return '';
+function ownText(el) {
+    var own = Array.prototype.filter.call(el.childNodes, function(n) {
+        return n.nodeType === 3 && (n.textContent || '').trim();
+    }).map(function(n) { return n.textContent.trim(); }).join(' ');
+    return own || (el.innerText || '').replace(/\\s+/g, ' ').trim();
+}
+function tryClick(root) {
+    var els = root.querySelectorAll('*');
+    for (var i = 0; i < els.length; i++) {
+        var t = ownText(els[i]);
+        if (t && /renew|extend/i.test(t) && !/renew in|cooldown/i.test(t)
+            && !/\\$|pay|upgrade|buy/i.test(t) && vis(els[i])) {
+            els[i].scrollIntoView({block: 'center'});
+            els[i].click();
+            return t;
+        }
+        if (els[i].shadowRoot) {
+            var hit = tryClick(els[i].shadowRoot);
+            if (hit) return hit;
+        }
+    }
+    return '';
+}
+return tryClick(document);
 """
 
 BILLING_LINK_JS = """
@@ -602,12 +659,50 @@ def run_flow(sb):
     # Do not wait for the bot to go offline: scan for ANY Renew control on
     # the bot page first, then on the billing page, and renew whenever a
     # clickable one exists.
+    # v18: the bot page alone missed the control twice after expiry (#26,
+    # #27), so also try a More/Actions menu on the bot page, then scan the
+    # billing page (link click, then direct URL) and the bot list page.
+    # Whatever page a candidate is found on is where the click happens.
     candidates = scan_renew_candidates(sb, "bot page")
+    if not candidates:
+        opened = js(sb, """
+var bs = document.querySelectorAll('button, [role="button"]');
+for (var i = 0; i < bs.length; i++) {
+    var t = (bs[i].innerText || '').trim();
+    if (/^(more|actions|manage|\\.\\.\\.|⋯)$/i.test(t)) { bs[i].click(); return t; }
+}
+return '';
+""", "")
+        if opened:
+            log("opened menu:", opened)
+            sb.sleep(2)
+            candidates = scan_renew_candidates(sb, "bot page menu")
     if not candidates:
         if js(sb, BILLING_LINK_JS, False):
             sb.sleep(4)
             sb.wait_for_ready_state_complete()
             candidates = scan_renew_candidates(sb, "billing page")
+    if not candidates:
+        for url, where in [(f"{PANEL}/billing", "billing url"),
+                           (f"{PANEL}/bots", "bot list")]:
+            try:
+                sb.open(url)
+                sb.wait_for_ready_state_complete()
+                sb.sleep(3)
+            except Exception as e:
+                log(f"open {where} failed:", e)
+                continue
+            candidates = scan_renew_candidates(sb, where)
+            if candidates:
+                break
+    if not candidates:
+        # Back on the bot page for the stopped/expired state check below.
+        try:
+            sb.open(BOT_URL)
+            sb.wait_for_ready_state_complete()
+            sb.sleep(3)
+        except Exception:
+            pass
 
     cooldown = None
     action = None
@@ -631,6 +726,17 @@ def run_flow(sb):
             notify("✅ 已重新启动", expiry=expiry_snippet(page_text(sb)) or before)
         else:
             log("no renew control available - nothing to renew this run")
+            # v18: leave evidence even on a "successful" run - the log now
+            # lists what the panel actually offered, and the screenshot is
+            # uploaded on every run (workflow: always()), not only on failure.
+            try:
+                log("page url:", sb.get_current_url())
+            except Exception:
+                pass
+            controls = js(sb, ALL_CONTROLS_JS, []) or []
+            log("visible controls on bot page:", " | ".join(controls[:40]) or "(none)")
+            log("page text:", page_text(sb)[:500])
+            shot(sb, "no-renew-control")
             notify("⏳ 未到续期时间", expiry=before)
         shot(sb, "done")
         log("renew flow finished")
